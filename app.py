@@ -1,41 +1,52 @@
 import streamlit as st
 import pandas as pd
 import tempfile
-from tabula import read_pdf
+import pdfplumber # Changed from tabula
 import fitz  # PyMuPDF
 import os
 import json
 import io
 from PIL import Image
 
+# Ensure you have pdfplumber installed: pip install pdfplumber pandas streamlit Pillow PyMuPDF
+
 def convert_tables_to_json(tables):
-    """Convert multiple tables into single SurveyJS JSON format"""
+    """Convert multiple pandas DataFrames into a single SurveyJS JSON format."""
     all_elements = []
-    for idx, table in enumerate(tables):
-        # Create column definitions - removed extra columns
+    for idx, table_df in enumerate(tables):
+        if not isinstance(table_df, pd.DataFrame):
+            st.error(f"Item {idx+1} in tables list is not a DataFrame. Skipping.")
+            continue
+        if table_df.empty:
+            st.warning(f"Table {idx+1} is empty. Skipping.")
+            continue
+
+        # Create column definitions
         columns = [
-            {"name": col, "title": col, "cellType": "text"}
-            for col in table.columns
+            {"name": str(col), "title": str(col), "cellType": "text"} # Ensure col is string
+            for col in table_df.columns
         ]
         
-        # Process rows - removed extra columns
+        # Process rows
         row_data = {}
-        rows = []
-        for i in range(len(table)):
+        rows_for_surveyjs = [] # SurveyJS expects a list of row identifiers/names
+        for i in range(len(table_df)):
             row_name = f"Row {i + 1}"
-            rows.append(row_name)
-            row_data[row_name] = {
-                col: str(table.iloc[i][col]) if pd.notna(table.iloc[i][col]) else ""
-                for col in table.columns
-            }
+            rows_for_surveyjs.append(row_name)
+            current_row_values = {}
+            for col in table_df.columns:
+                cell_value = table_df.iloc[i][col]
+                current_row_values[str(col)] = str(cell_value) if pd.notna(cell_value) else ""
+            row_data[row_name] = current_row_values
         
         # Create element for this table
         element = {
             "type": "matrixdropdown",
             "name": f"Table {idx + 1}",
+            "title": f"Details for Table {idx + 1}", # Added a title for clarity in SurveyJS
             "defaultValue": row_data,
             "columns": columns,
-            "rows": rows
+            "rows": rows_for_surveyjs # Use the generated list of row names
         }
         all_elements.append(element)
     
@@ -50,10 +61,15 @@ def convert_tables_to_json(tables):
     }
 
 # Streamlit UI
-st.title("PDF Table Extractor & JSON Converter")
+st.set_page_config(layout="wide") # Use wider layout for better table display
+st.title("📄 PDF Table Extractor & JSON Converter")
+st.markdown("""
+Upload a PDF file to extract tables. You can then preview the PDF, view extracted tables,
+trim rows, edit data, split tables, and finally convert them into SurveyJS JSON format or download as CSV.
+""")
 
 # Upload PDF
-uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
+uploaded_file = st.file_uploader("📂 Upload a PDF file", type=["pdf"])
 
 if uploaded_file is not None:
     # Save to temporary file
@@ -61,104 +77,210 @@ if uploaded_file is not None:
         temp_file.write(uploaded_file.getbuffer())
         temp_file_path = temp_file.name
 
-    # Preview PDF as images using PyMuPDF
-    st.subheader("PDF Preview")
+    st.sidebar.header("📄 PDF Preview")
     try:
-        # Open the PDF
         pdf_document = fitz.open(temp_file_path)
-        
-        # Convert pages to images
-        for page_num in range(len(pdf_document)):
-            # Render page to an image
-            page = pdf_document[page_num]
-            pix = page.get_pixmap(matrix=fitz.Matrix(300/72, 300/72))  # High resolution
-            
-            # Convert to PIL Image
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            
-            # Display the image
-            st.image(img, caption=f"Page {page_num+1}", use_container_width=True)
-        
-        # Close the PDF document
-        pdf_document.close()
-    
-    except Exception as preview_error:
-        st.error(f"Error previewing PDF: {preview_error}")
-    
-    # Extract tables
-    try:
-        tables = read_pdf(temp_file_path, pages='all', multiple_tables=True, pandas_options={'header': 0})
-        if tables:
-            df = tables[0]  # Use the first table
-            
-            # Replace NaN values with empty strings
-            df = df.fillna("")
-            
-            # Trim rows slider
-            st.write("Trim rows from top and bottom:")
-            trim_range = st.slider(
-                "Select range of rows to keep:",
-                0, len(df)-1, (0, len(df)-1),
-                key="trim_slider"
-            )
-            
-            # Apply trimming
-            trimmed_df = df.iloc[trim_range[0]:trim_range[1]+1]
-            
-            st.subheader("Trimmed Table")
-            edited_df = st.data_editor(trimmed_df)  # Allow editing of the table
-            
-            # Split table - initial value set to 1
-            num_splits = st.number_input("Enter number of parts to split the table into:", 
-                                       min_value=1, 
-                                       max_value=len(edited_df), 
-                                       value=1)  # Changed initial value to 1
-            
-            split_points = [st.number_input(f"Enter row index for split {i+1}:", 
-                                          min_value=0, 
-                                          max_value=len(edited_df)-1, 
-                                          value=int(i * len(edited_df) / num_splits)) 
-                          for i in range(1, num_splits)]
-            split_points = [0] + split_points + [len(edited_df)]
-            
-            split_tables = [edited_df.iloc[split_points[i]:split_points[i+1]] 
-                          for i in range(len(split_points)-1)]
-            
-            # Display split tables
-            for idx, new_table in enumerate(split_tables):
-                st.subheader(f"Split Table {idx+1}")
-                st.dataframe(new_table)
-                
-                # Download CSV option
-                csv = new_table.to_csv(index=False)
-                st.download_button(
-                    f"Download Split Table {idx+1} (CSV)", 
-                    csv, 
-                    f"split_table_{idx+1}.csv", 
-                    "text/csv"
-                )
-            
-            # Convert all split tables to single JSON
-            combined_json = convert_tables_to_json(split_tables)
-            
-            # Display and download JSON
-            st.subheader("Combined JSON Output")
-            st.markdown("[Test your JSON in SurveyJS Creator](https://surveyjs.io/create-free-survey)")
-            st.json(combined_json)
-            
-            # Download JSON option
-            json_str = json.dumps(combined_json, indent=2)
-            st.download_button(
-                "Download Combined JSON",
-                json_str,
-                "combined_tables.json",
-                "application/json"
-            )
+        if len(pdf_document) == 0:
+            st.sidebar.warning("The PDF is empty or could not be read for preview.")
         else:
-            st.warning("No tables found in the PDF.")
+            for page_num in range(len(pdf_document)):
+                page = pdf_document[page_num]
+                # Render page to an image (adjust DPI for performance vs quality)
+                # Using 150 DPI for a balance
+                pix = page.get_pixmap(matrix=fitz.Matrix(150/72, 150/72)) 
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                st.sidebar.image(img, caption=f"Page {page_num+1}", use_container_width=True)
+        pdf_document.close()
+    except Exception as preview_error:
+        st.sidebar.error(f"Error previewing PDF: {preview_error}")
+    
+    st.header("📊 Extracted Tables & Operations")
+    try:
+        extracted_tables_dfs = []
+        with pdfplumber.open(temp_file_path) as pdf:
+            if not pdf.pages:
+                st.warning("The PDF contains no pages or could not be parsed by pdfplumber.")
+            for page_num, page in enumerate(pdf.pages):
+                # extract_tables() returns a list of tables found on the page.
+                # Each table is a list of rows, and each row is a list of cell contents.
+                page_tables_data = page.extract_tables()
+                if not page_tables_data:
+                    st.info(f"No tables found on page {page_num + 1}.")
+                    continue
+                
+                st.write(f"Found {len(page_tables_data)} table(s) on page {page_num + 1}:")
+                for table_idx, table_data in enumerate(page_tables_data):
+                    if table_data:  # If table data is not empty
+                        # Convert list of lists to DataFrame
+                        header = table_data[0]
+                        # Ensure header is a list of strings, replacing None with placeholders
+                        columns = [str(h) if h is not None else f"Column_{i+1}" for i, h in enumerate(header)]
+                        
+                        data_rows = table_data[1:]
+                        
+                        if not data_rows and not columns: # Completely empty table
+                            df = pd.DataFrame()
+                        elif not data_rows: # Table with only header
+                             df = pd.DataFrame(columns=columns)
+                        else: # Table with header and data
+                            df = pd.DataFrame(data_rows, columns=columns)
+                        
+                        df = df.fillna("") # Replace NaN/None with empty strings for consistency
+                        extracted_tables_dfs.append(df)
+                    else:
+                        st.info(f"An empty table structure was detected on page {page_num + 1}, table {table_idx +1}.")
+
+
+        if extracted_tables_dfs:
+            st.success(f"Successfully extracted {len(extracted_tables_dfs)} table(s) from the PDF.")
+            
+            # For simplicity, we'll focus UI operations on the first extracted table.
+            # You could extend this to select which table to operate on if multiple are found.
+            df_to_operate = extracted_tables_dfs[0].copy() 
+            
+            st.subheader("🔬 Preview and Edit First Extracted Table")
+            st.info("The operations below (trim, edit, split) apply to the *first* table extracted from the PDF.")
+            st.dataframe(df_to_operate)
+
+            # Trim rows slider
+            st.subheader("✂️ Trim Rows")
+            if not df_to_operate.empty:
+                trim_range = st.slider(
+                    "Select range of rows to keep (for the first table):",
+                    0, len(df_to_operate)-1, (0, len(df_to_operate)-1) if len(df_to_operate) > 0 else (0,0),
+                    key="trim_slider"
+                )
+                trimmed_df = df_to_operate.iloc[trim_range[0]:trim_range[1]+1]
+            else:
+                st.warning("Cannot trim an empty table.")
+                trimmed_df = df_to_operate.copy()
+
+            st.subheader("✏️ Editable Table (Trimmed)")
+            if not trimmed_df.empty:
+                edited_df = st.data_editor(trimmed_df, num_rows="dynamic")
+            else:
+                st.warning("Trimmed table is empty, cannot edit.")
+                edited_df = trimmed_df.copy()
+            
+            st.subheader("쪼개다 Split Table") # "쪼개다" means "split" in Korean, as per original comment style
+            if not edited_df.empty:
+                num_splits = st.number_input("Enter number of parts to split the table into:", 
+                                           min_value=1, 
+                                           max_value=len(edited_df) if len(edited_df) > 0 else 1, 
+                                           value=1)
+                
+                split_points_input = []
+                if num_splits > 1:
+                    st.write("Define row indices where splits should occur (0-indexed). The table will be split *before* these rows.")
+                    # Help text for split points
+                    st.caption(f"Enter {num_splits - 1} split points. For example, to split a 10-row table into 3 parts, you might enter 2 split points like 3 and 7. This creates tables of rows 0-2, 3-6, and 7-9.")
+
+                    cols = st.columns(num_splits - 1)
+                    for i in range(num_splits - 1):
+                        with cols[i]:
+                            default_split_val = int((i + 1) * len(edited_df) / num_splits)
+                            # Ensure default_split_val is within valid range
+                            default_split_val = max(1, min(default_split_val, len(edited_df) -1))
+
+                            split_idx = st.number_input(
+                                f"Split after row index for part {i+1} (ends part {i+1}):",
+                                min_value=0,  # Min is 0 (start of table)
+                                max_value=len(edited_df) - 2 if len(edited_df) > 1 else 0, # Max is second to last row
+                                value=default_split_val -1 if default_split_val > 0 else 0, # Adjust default to be "after row index"
+                                key=f"split_point_{i}"
+                            )
+                            split_points_input.append(split_idx + 1) # Convert "after row" to "start of next table"
+                
+                # Sort and unique split points, then add start and end boundaries
+                split_points = sorted(list(set([0] + split_points_input + [len(edited_df)])))
+                # Remove any split points outside the bounds or duplicates that might cause empty DFs
+                split_points = [sp for i, sp in enumerate(split_points) if sp >=0 and sp <= len(edited_df) and (i == 0 or sp > split_points[i-1])]
+
+
+                split_tables = []
+                for i in range(len(split_points)-1):
+                    start_row = split_points[i]
+                    end_row = split_points[i+1]
+                    if start_row < end_row : # Ensure valid slice
+                         split_tables.append(edited_df.iloc[start_row:end_row])
+                
+                if not split_tables and not edited_df.empty: # If splitting resulted in no tables but original was not empty
+                    st.warning("Splitting configuration resulted in no valid tables. Using the edited table as a single part.")
+                    split_tables = [edited_df.copy()]
+                elif not split_tables and edited_df.empty:
+                    st.info("Original table is empty, so no split tables generated.")
+
+
+                for idx, new_table in enumerate(split_tables):
+                    if not new_table.empty:
+                        st.subheader(f"Split Table Part {idx+1}")
+                        st.dataframe(new_table)
+                        
+                        # Download CSV option
+                        csv = new_table.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label=f"📥 Download Part {idx+1} (CSV)", 
+                            data=csv, 
+                            file_name=f"split_table_part_{idx+1}.csv", 
+                            mime="text/csv",
+                            key=f"csv_download_{idx}"
+                        )
+                    else:
+                        st.info(f"Split Table Part {idx+1} is empty.")
+            else:
+                st.warning("Cannot split an empty table.")
+                split_tables = [] # Ensure split_tables is defined
+            
+            # Convert all split tables (derived from the first extracted table) to single JSON
+            if split_tables:
+                combined_json = convert_tables_to_json(split_tables)
+                
+                st.header("📜 Combined SurveyJS JSON Output")
+                st.markdown("This JSON combines the (potentially split) parts of the *first* extracted table.")
+                st.markdown("[Test your JSON in SurveyJS Creator](https://surveyjs.io/create-free-survey)")
+                st.json(combined_json)
+                
+                json_str = json.dumps(combined_json, indent=2).encode('utf-8')
+                st.download_button(
+                    label="📥 Download Combined JSON",
+                    data=json_str,
+                    file_name="surveyjs_tables.json",
+                    mime="application/json",
+                    key="json_download_combined"
+                )
+            elif not edited_df.empty: # If there were no splits, but there was an edited table
+                st.info("No splits were made, or splits resulted in empty tables. Converting the edited table as a single unit.")
+                combined_json = convert_tables_to_json([edited_df.copy()]) # Convert the single edited table
+                st.header("📜 SurveyJS JSON Output (Single Table)")
+                st.markdown("[Test your JSON in SurveyJS Creator](https://surveyjs.io/create-free-survey)")
+                st.json(combined_json)
+                json_str = json.dumps(combined_json, indent=2).encode('utf-8')
+                st.download_button(
+                    label="📥 Download JSON (Single Table)",
+                    data=json_str,
+                    file_name="surveyjs_table.json",
+                    mime="application/json",
+                    key="json_download_single"
+                )
+            else:
+                st.info("No tables to convert to JSON.")
+
+        else:
+            st.warning("No tables were found in the PDF using pdfplumber.")
     except Exception as e:
-        st.error(f"Error reading PDF: {e}")
-        st.error(str(e))
+        st.error(f"An error occurred during table processing: {e}")
+        # For more detailed debugging, you might want to log the traceback
+        # import traceback
+        # st.error(traceback.format_exc())
     
     # Cleanup
-    os.unlink(temp_file_path)
+    try:
+        os.unlink(temp_file_path)
+    except Exception as e:
+        st.warning(f"Could not delete temporary file {temp_file_path}: {e}")
+
+else:
+    st.info("Please upload a PDF file to begin.")
+
+st.markdown("---")
+st.markdown("Made with ❤️ using Streamlit and Pdfplumber.")

@@ -1,5 +1,5 @@
-streamlit>=1.22.0
-pandas>=1.5.3
-tabula-py>=2.7.0
-PyMuPDF>=1.22.3
-Pillow>=10.0.0
+streamlit
+pandas
+pdfplumber
+PyMuPDF
+Pillow

@@ -22,21 +22,31 @@ def convert_tables_to_json(tables):
             continue
 
         # Create column definitions
-        columns = [
-            {"name": str(col), "title": str(col), "cellType": "text"} # Ensure col is string
-            for col in table_df.columns
-        ]
+        # MODIFIED: Ensure 'name' for columns is never empty
+        columns = []
+        for i, col_header in enumerate(table_df.columns):
+            col_name_str = str(col_header).strip() # Convert to string and strip whitespace
+            if not col_name_str: # If column name is empty after stripping
+                col_name_str = f"Unnamed_Column_{i+1}"
+            
+            columns.append({
+                "name": col_name_str, 
+                "title": str(col_header) if str(col_header).strip() else col_name_str, # Use original for title if not empty, else use the generated name
+                "cellType": "text"
+            })
         
         # Process rows
         row_data = {}
         rows_for_surveyjs = [] # SurveyJS expects a list of row identifiers/names
-        for i in range(len(table_df)):
-            row_name = f"Row {i + 1}"
+        for i_row in range(len(table_df)):
+            row_name = f"Row {i_row + 1}"
             rows_for_surveyjs.append(row_name)
             current_row_values = {}
-            for col in table_df.columns:
-                cell_value = table_df.iloc[i][col]
-                current_row_values[str(col)] = str(cell_value) if pd.notna(cell_value) else ""
+            for col_idx, col_original_header in enumerate(table_df.columns):
+                # Use the same logic for accessing column data as used for defining column 'name'
+                col_name_for_json = columns[col_idx]["name"] # Get the name used in JSON column definition
+                cell_value = table_df.iloc[i_row][col_original_header]
+                current_row_values[col_name_for_json] = str(cell_value) if pd.notna(cell_value) else ""
             row_data[row_name] = current_row_values
         
         # Create element for this table
@@ -114,16 +124,31 @@ if uploaded_file is not None:
                         # Convert list of lists to DataFrame
                         header = table_data[0]
                         # Ensure header is a list of strings, replacing None with placeholders
-                        columns = [str(h) if h is not None else f"Column_{i+1}" for i, h in enumerate(header)]
+                        # MODIFIED: Ensure column headers are unique and not empty for DataFrame creation
+                        columns_df = []
+                        temp_col_names = set()
+                        for i, h in enumerate(header):
+                            col_name = str(h).strip() if h is not None else ""
+                            if not col_name: # If empty or None
+                                col_name = f"Extracted_Column_{i+1}"
+                            
+                            # Ensure uniqueness for DataFrame columns
+                            original_col_name = col_name
+                            count = 1
+                            while col_name in temp_col_names:
+                                col_name = f"{original_col_name}_{count}"
+                                count += 1
+                            temp_col_names.add(col_name)
+                            columns_df.append(col_name)
                         
                         data_rows = table_data[1:]
                         
-                        if not data_rows and not columns: # Completely empty table
+                        if not data_rows and not columns_df: # Completely empty table
                             df = pd.DataFrame()
                         elif not data_rows: # Table with only header
-                             df = pd.DataFrame(columns=columns)
+                             df = pd.DataFrame(columns=columns_df)
                         else: # Table with header and data
-                            df = pd.DataFrame(data_rows, columns=columns)
+                            df = pd.DataFrame(data_rows, columns=columns_df)
                         
                         df = df.fillna("") # Replace NaN/None with empty strings for consistency
                         extracted_tables_dfs.append(df)

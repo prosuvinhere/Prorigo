@@ -1,5 +1,7 @@
 streamlit
 pandas
 pdfplumber
-PyMuPDF
-Pillow
+pymupdf
+pillow
+tabula-py
+streamlit-extras
